@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod animations;
+
 use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
@@ -9,7 +11,8 @@ use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::{bind_interrupts, dma, peripherals, pio};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::zerocopy_channel;
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
+use fixed::types::*;
 use panic_probe as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
@@ -30,6 +33,13 @@ async fn main(spawner: Spawner) {
     info!("Start");
     let p = embassy_rp::init(Default::default());
 
+    // We use two tasks, one in charge of calculating pixels,
+    // and one in charge of blinking out to the strip.
+    // This is probably somewhat excessive, but provides nice separation,
+    // and could be split across cores, if needed.
+    // We tie them together via a zerocopy channel,
+    // which in effect implements double-buffering,
+    // while avoiding any unsafe/manual lifetime shenanigans.
     static RAW_BUF: StaticCell<[Pixbuf; 2]> = StaticCell::new();
     static CHANNEL: StaticCell<zerocopy_channel::Channel<'_, NoopRawMutex, Pixbuf>> =
         StaticCell::new();
@@ -52,30 +62,6 @@ const fn gamma(c: RGB8) -> RGB8 {
     }
 }
 
-const fn wheel(pos: u8) -> RGB8 {
-    // We do a color wheel in 3 sections, ramping linearly.
-    // Our range of 0..256 divides by 3 almost evenly,
-    // we end up returning pure red for pos=0 and pos=255.
-    if pos < 85 {
-        let d = 3 * pos;
-        return RGB8::new(255 - d, d, 0);
-    } else if pos < 170 {
-        let d = 3 * (pos - 85);
-        return RGB8::new(0, 255 - d, d);
-    } else {
-        let d = 3 * (pos - 170);
-        return RGB8::new(d, 0, 255 - d);
-    }
-}
-
-fn flag<const N: usize>(colors: [RGB8; N]) -> [RGB8; 256] {
-    let mut result = [RGB8::default(); 256];
-    for i in 0..192 {
-        result[i] = colors[i * N / 192];
-    }
-    return result;
-}
-
 fn scale(factor: u8, mut colors: [RGB8; 256]) -> [RGB8; 256] {
     for c in &mut colors {
         *c /= factor;
@@ -83,13 +69,6 @@ fn scale(factor: u8, mut colors: [RGB8; 256]) -> [RGB8; 256] {
     return colors;
 }
 
-fn rampbow() -> [RGB8; 256] {
-    let mut result = [RGB8::default(); _];
-    for i in 0..256 {
-        result[i] = wheel(255 - i as u8);
-    }
-    return result;
-}
 fn hsvbow() -> [RGB8; 256] {
     let mut result = [RGB8::default(); 256];
     for i in 0..256 {
@@ -113,28 +92,68 @@ pub const FLAG_LESSBEANS:    [RGB8; 7] = colors_linear![ #D52D00, #EF7627, #FF9A
 pub const FLAG_BI:           [RGB8; 5] = colors_linear![ #D60270, #D60270, #9B4F96, #0038A8, #0038A8];
 pub const FLAG_NUMEROUSBEES: [RGB8; 4] = colors_linear![ #FCF434, #FFFFFF, #9C59D1, #2C2C2C];
 pub const FLAG_PAN:          [RGB8; 3] = colors_linear![ #FF218C, #FFD800, #21B1FF];
+
+// A walk through Oklch(0.7, 0.15, x) with small tweaks,
+// see extras/wheelscan.py
+pub const WHEEL_OKLAB_07:   [RGB8; 16] = colors_linear![ #E8729B, #ED7472, #E97C48, #DB8912, #C19905, #A1A717, #74B34C, #30BA79, #00B8A1, #01B4BF, #05AFDC, #43A5F6, #7A98FC, #A28BF3, #C17FDE, #D977C0];
 }
-use flags::*;
+use crate::flags::*;
+
+// Returns a value ramping across [0, 1), repeating every `secs`.
+fn time_strobe(secs: u64) -> I8F24 {
+    // This implementation is a bit rough, there's likely a better way to do this.
+
+    // embassy-rp as time driver configures a 1MHz tick rate.
+    // We know: ticks since startup won't overflow a u64 (takes ~600k years)
+    // We assume: width as ticks won't overflow a u32 (true for secs <= 4294).
+    let now = Instant::now().as_ticks();
+    let width = Instant::from_secs(secs).as_ticks();
+    // We need the fractional part of division, and width isn't a nice power of 2.
+    // The common trick (which fixed uses) is to go up one integer width:
+    // given x: u32, y: u32, you can calculate
+    // let wide_div: u64 = ((x as u64) << 32) / y;
+    // but with our inputs already u64, that calls for a U128/U64 division.
+    // Which, on a 32-bit CPU, might be slow.
+    //
+    // So instead, we first do a U64%U64 modulo.
+    let remainder = now % width;
+    // Now, since we assumed width fits in u32, remainder will too.
+    let width = U32F0::from_num(width);
+    let remainder = U32F0::from_num(remainder);
+    // Then we do a wide_div between u32s, only doing a U64/U32 division.
+    let result: U32F32 = remainder.wide_div(width);
+    // Finally we can truncate to our desired precision.
+    return I8F24::from_num(result);
+}
+
+const ANIM_SECS: u64 = 60;
 
 #[embassy_executor::task]
 async fn producer(mut s: zerocopy_channel::Sender<'static, NoopRawMutex, Pixbuf>) {
-    let ctable = scale(
-        4,
-        flag(FLAG_PRIDE),
-        //hsvbow(),
-        //rampbow()
-    );
     let mut ticker = Ticker::every(Duration::from_millis(10));
+    const LINEAR: animations::Linear<NUM_LEDS> = animations::Linear;
+    let mut anim = animations::ManyAnim::new(
+        animations::rgbwheel(LINEAR),
+        animations::smoothwheel(LINEAR, &WHEEL_OKLAB_07),
+        animations::flag(LINEAR, &FLAG_BI),
+        animations::flag(LINEAR, &FLAG_LESSBEANS),
+    );
+    anim.set_fade(U8F8::lit("0.125"));
+    let mut last_strobe: I8F24 = I8F24::ZERO;
     loop {
-        for offset in 0..256 {
-            run_send(&mut s, |buf| {
-                for i in 0..NUM_LEDS {
-                    buf[i] = ctable[(offset - 256 * i / NUM_LEDS) & 255];
-                }
-            })
-            .await;
-            ticker.next().await;
+        let now: I8F24 = time_strobe(ANIM_SECS);
+        if last_strobe > now {
+            // Each time the strobe walks backwards,
+            // we assume we just completed a cycle, so cycle animations.
+            anim.advance();
         }
+        last_strobe = now;
+
+        run_send(&mut s, |buf| {
+            anim.frame(now, buf);
+        })
+        .await;
+        ticker.next().await;
     }
 }
 
@@ -167,7 +186,7 @@ async fn consumer(
 }
 
 // A small ergonomics helper for zerocopy channels:
-// Awaits an available send slot, runs the passed closure,
+// Awaits an available send slot, runs the passed closure on it,
 // then automatically marks the value as ready.
 async fn run_send<M, T, R, F>(s: &mut zerocopy_channel::Sender<'static, M, T>, f: F) -> R
 where
