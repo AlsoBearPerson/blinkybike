@@ -1,4 +1,4 @@
-#!/usr/bin/env -vS uv run
+#!/usr/bin/env -S uv run
 #
 # A quick little script to try and build a color wheel in a nicer color space
 # than RGB. We use Oklab/Oklch because it came up in web searches.

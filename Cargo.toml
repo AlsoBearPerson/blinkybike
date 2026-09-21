@@ -28,6 +28,7 @@ smart-leds = "0.4.0"
 static_cell = "2.1.1"
 
 color-parse = { version = "0.1.0", path = "color-parse/" }
+embassy-futures = { version = "0.1.2", features = ["defmt"] }
 
 [profile.release]
 # Since we don't actually ship the full ELF to the target device,

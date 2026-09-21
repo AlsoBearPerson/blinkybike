@@ -9,6 +9,7 @@
 // But we might consider tightening it to I4F12, perhaps,
 // and having code expand that when needed.
 
+use defmt::*;
 use fixed::prelude::*;
 use fixed::types::*;
 use smart_leds::RGB8;
@@ -99,11 +100,31 @@ where
 }
 
 // Basic linear mapping, assuming a fixed LED layout.
-// Will produce odd results if the number of LEDs requested differs.
+// Will exceed intended range if the number of LEDs requested differs.
 pub struct Linear<const NUM_LEDS: usize>;
 impl<const NUM_LEDS: usize> LedMapper for Linear<NUM_LEDS> {
     fn remap(&self, led: usize) -> I8F24 {
         let frac: I8F24 = I8F24::ONE / (NUM_LEDS as i32);
+        return frac * (led as i32);
+    }
+}
+
+// Linear two-strip mapping, flipping the second strip.
+// Suited for setups where two strips are laid out with their inputs together,
+// then wrap around a center and meet up end-to-end on the other side,
+// and so reversing one of them means our mapped offset walks the circle.
+pub struct LinRev<const N1_LEDS: usize, const N2_LEDS: usize>;
+impl<const N1_LEDS: usize, const N2_LEDS: usize> LedMapper for LinRev<N1_LEDS, N2_LEDS> {
+    fn remap(&self, led: usize) -> I8F24 {
+        let frac: I8F24 = I8F24::ONE / (N1_LEDS + N2_LEDS) as i32;
+        let led = if led < N1_LEDS {
+            led
+        } else {
+            // Reverse order of second strip: strip2 0 is last,
+            // strip 2 N-1 is first
+            let rev_index = N1_LEDS + N2_LEDS - 1 - led;
+            N1_LEDS + rev_index
+        };
         return frac * (led as i32);
     }
 }

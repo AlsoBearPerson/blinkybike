@@ -19,10 +19,12 @@ use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<peripherals::PIO0>;
-    DMA_IRQ_0 => dma::InterruptHandler<peripherals::DMA_CH0>;
+    DMA_IRQ_0 => dma::InterruptHandler<peripherals::DMA_CH0>, dma::InterruptHandler<peripherals::DMA_CH1>;
 });
 
-const NUM_LEDS: usize = 20;
+const N1_LEDS: usize = 20;
+const N2_LEDS: usize = 15;
+const NUM_LEDS: usize = N1_LEDS + N2_LEDS;
 type Pixbuf = [RGB8; NUM_LEDS];
 
 #[embassy_executor::main(
@@ -49,7 +51,7 @@ async fn main(spawner: Spawner) {
     let (send, recv) = chan.split();
 
     spawner.spawn(producer(send).unwrap());
-    spawner.spawn(consumer(recv, p.PIO0, p.DMA_CH0, p.PIN_16).unwrap());
+    spawner.spawn(consumer(recv, p.PIO0, p.DMA_CH0, p.DMA_CH1, p.PIN_16, p.PIN_17).unwrap());
 }
 
 const GAMMA8: [u8; 256] = color_parse::srgb_to_linear_table!();
@@ -117,13 +119,13 @@ fn time_strobe(secs: u64) -> I8F24 {
     //
     // So instead, we first do a U64%U64 modulo.
     let remainder = now % width;
-    // Now, since we assumed width fits in u32, remainder will too.
+    // Now, since we're assuming width fits in u32, remainder will too.
     let width = U32F0::from_num(width);
     let remainder = U32F0::from_num(remainder);
     // Then we do a wide_div between u32s, only doing a U64/U32 division.
     let result: U32F32 = remainder.wide_div(width);
     // Finally we can truncate to our desired precision.
-    return I8F24::from_num(result);
+    return result.to_num();
 }
 
 const ANIM_SECS: u64 = 60;
@@ -131,10 +133,10 @@ const ANIM_SECS: u64 = 60;
 #[embassy_executor::task]
 async fn producer(mut s: zerocopy_channel::Sender<'static, NoopRawMutex, Pixbuf>) {
     let mut ticker = Ticker::every(Duration::from_millis(10));
-    const LINEAR: animations::Linear<NUM_LEDS> = animations::Linear;
+    const LINEAR: animations::LinRev<N1_LEDS, N2_LEDS> = animations::LinRev;
     let mut anim = animations::ManyAnim::new(
-        animations::rgbwheel(LINEAR),
         animations::smoothwheel(LINEAR, &WHEEL_OKLAB_07),
+        animations::rgbwheel(LINEAR),
         animations::flag(LINEAR, &FLAG_BI),
         animations::flag(LINEAR, &FLAG_LESSBEANS),
     );
@@ -161,18 +163,28 @@ async fn producer(mut s: zerocopy_channel::Sender<'static, NoopRawMutex, Pixbuf>
 async fn consumer(
     mut r: zerocopy_channel::Receiver<'static, NoopRawMutex, Pixbuf>,
     pio: embassy_rp::Peri<'static, embassy_rp::peripherals::PIO0>,
-    dma: embassy_rp::Peri<'static, embassy_rp::peripherals::DMA_CH0>,
-    pin: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_16>,
+    dma1: embassy_rp::Peri<'static, embassy_rp::peripherals::DMA_CH0>,
+    dma2: embassy_rp::Peri<'static, embassy_rp::peripherals::DMA_CH1>,
+    pin1: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_16>,
+    pin2: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_17>,
 ) {
     let Pio {
-        mut common, sm0, ..
+        mut common,
+        sm0,
+        sm1,
+        ..
     } = Pio::new(pio, Irqs);
     let program = PioWs2812Program::new(&mut common);
-    let mut ws2812 = PioWs2812::new(&mut common, sm0, dma, Irqs, pin, &program);
+    let mut ws2812_1: PioWs2812<_, _, N1_LEDS, _> =
+        PioWs2812::new(&mut common, sm0, dma1, Irqs, pin1, &program);
+    let mut ws2812_2: PioWs2812<_, _, N2_LEDS, _> =
+        PioWs2812::new(&mut common, sm1, dma2, Irqs, pin2, &program);
 
     loop {
         run_recv(&mut r, async |buf| {
-            ws2812.write(buf).await;
+            let f1 = ws2812_1.write(buf.first_chunk().unwrap());
+            let f2 = ws2812_2.write(buf.last_chunk().unwrap());
+            embassy_futures::join::join(f1, f2).await;
         })
         .await;
         // Compensate for a minor bug in ws2812.write:
@@ -205,7 +217,7 @@ where
 async fn run_recv<M, T, F, R>(r: &mut zerocopy_channel::Receiver<'static, M, T>, f: F) -> R
 where
     F: AsyncFnOnce(&mut T) -> R,
-    M: RawMutex
+    M: RawMutex,
 {
     let v = r.receive().await;
     let result = f(v).await;
