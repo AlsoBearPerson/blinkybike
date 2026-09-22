@@ -2,6 +2,7 @@
 #![no_main]
 
 mod animations;
+mod bleuart;
 
 use defmt::*;
 use defmt_rtt as _;
@@ -19,7 +20,11 @@ use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<peripherals::PIO0>;
-    DMA_IRQ_0 => dma::InterruptHandler<peripherals::DMA_CH0>, dma::InterruptHandler<peripherals::DMA_CH1>;
+    PIO1_IRQ_0 => pio::InterruptHandler<peripherals::PIO1>;
+    DMA_IRQ_0 => dma::InterruptHandler<peripherals::DMA_CH0>,
+        dma::InterruptHandler<peripherals::DMA_CH1>,
+        dma::InterruptHandler<peripherals::DMA_CH2>,
+        dma::InterruptHandler<peripherals::DMA_CH3>;
 });
 
 const N1_LEDS: usize = 20;
@@ -34,6 +39,10 @@ type Pixbuf = [RGB8; NUM_LEDS];
 async fn main(spawner: Spawner) {
     info!("Start");
     let p = embassy_rp::init(Default::default());
+
+    spawner.spawn(unwrap!(bleuart::run_ble(
+        p.PIN_23, p.PIN_25, p.PIO1, p.PIN_24, p.PIN_29, p.DMA_CH2, p.DMA_CH3, spawner,
+    )));
 
     // We use two tasks, one in charge of calculating pixels,
     // and one in charge of blinking out to the strip.
@@ -50,8 +59,10 @@ async fn main(spawner: Spawner) {
     let chan = CHANNEL.init(zerocopy_channel::Channel::new(buf));
     let (send, recv) = chan.split();
 
-    spawner.spawn(producer(send).unwrap());
-    spawner.spawn(consumer(recv, p.PIO0, p.DMA_CH0, p.DMA_CH1, p.PIN_16, p.PIN_17).unwrap());
+    spawner.spawn(unwrap!(producer(send)));
+    spawner.spawn(unwrap!(consumer(
+        recv, p.PIO0, p.DMA_CH0, p.DMA_CH1, p.PIN_16, p.PIN_17
+    )));
 }
 
 const GAMMA8: [u8; 256] = color_parse::srgb_to_linear_table!();
@@ -175,15 +186,13 @@ async fn consumer(
         ..
     } = Pio::new(pio, Irqs);
     let program = PioWs2812Program::new(&mut common);
-    let mut ws2812_1: PioWs2812<_, _, N1_LEDS, _> =
-        PioWs2812::new(&mut common, sm0, dma1, Irqs, pin1, &program);
-    let mut ws2812_2: PioWs2812<_, _, N2_LEDS, _> =
-        PioWs2812::new(&mut common, sm1, dma2, Irqs, pin2, &program);
+    let mut ws2812_1 = PioWs2812::new(&mut common, sm0, dma1, Irqs, pin1, &program);
+    let mut ws2812_2 = PioWs2812::new(&mut common, sm1, dma2, Irqs, pin2, &program);
 
     loop {
         run_recv(&mut r, async |buf| {
-            let f1 = ws2812_1.write(buf.first_chunk().unwrap());
-            let f2 = ws2812_2.write(buf.last_chunk().unwrap());
+            let f1 = ws2812_1.write_slice(unwrap!(buf.first_chunk::<N1_LEDS>()));
+            let f2 = ws2812_2.write_slice(unwrap!(buf.last_chunk::<N2_LEDS>()));
             embassy_futures::join::join(f1, f2).await;
         })
         .await;
@@ -205,9 +214,9 @@ where
     F: FnOnce(&mut T) -> R,
     M: RawMutex,
 {
-    let buf: &mut T = s.send().await;
-    let result = f(buf);
-    s.send_done();
+    let mut slot = s.send().await;
+    let result = f(&mut *slot);
+    slot.send_done();
     return result;
 }
 
@@ -219,9 +228,9 @@ where
     F: AsyncFnOnce(&mut T) -> R,
     M: RawMutex,
 {
-    let v = r.receive().await;
-    let result = f(v).await;
-    r.receive_done();
+    let mut slot = r.receive().await;
+    let result = f(&mut *slot).await;
+    slot.receive_done();
     return result;
 }
 

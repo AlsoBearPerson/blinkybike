@@ -16,7 +16,7 @@ cortex-m = { version = "0.7.9", features = ["inline-asm"] }
 cortex-m-rt = "0.7.6"
 critical-section = "1.2.0"
 defmt = "1.1.1"
-defmt-rtt = { version = "1.3.0", features = ["disable-blocking-mode"] }
+defmt-rtt = { version = "1.3.0" } #, features = ["disable-blocking-mode"] }
 embassy-embedded-hal = { version = "0.6.0", features = ["defmt"] }
 embassy-executor = { version = "0.10.0", features = ["defmt"] }
 embassy-rp = { version = "0.10.0", features = ["defmt", "time-driver", "critical-section-impl", "rp235xa", "binary-info", "executor-thread"] }
@@ -29,6 +29,26 @@ static_cell = "2.1.1"
 
 color-parse = { version = "0.1.0", path = "color-parse/" }
 embassy-futures = { version = "0.1.2", features = ["defmt"] }
+trouble-host = { version = "0.8.0", features = ["derive", "gatt", "peripheral", "default-packet-pool", "defmt"], default-features = false }
+cyw43 = { version = "0.7.0", features = ["bluetooth", "defmt"] }
+cyw43-pio = { version = "0.10.0", features = ["defmt"] }
+heapless = { version = "0.9.3", features = ["defmt"] }
+
+# Unfortunate version conflict: Modern trouble-host requires new hc-bti,
+# but the released version of cyw43 doesn't support that yet.
+#
+# Depending on an older trouble-host proves awkward,
+# so we patch the major embassy pieces forward instead,
+# to the version updated to new hc-bti.
+# Unfortunately, we have to do this for the whole bunch,
+# otherwise we get in trouble with dependencies between them.
+[patch.crates-io]
+cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "3cd51e6d8eb6aff8b0d64d9e56a75a538bcfc65a" }
 
 [profile.release]
 # Since we don't actually ship the full ELF to the target device,
