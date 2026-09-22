@@ -87,7 +87,7 @@ and powerbanks in particular tend to broadly support many of them,
 but check the labeling for what it can do, and test with a multimeter.
 You can get various "USB-C PD sink" adapters, for example Adafruit
 sells [nice cables](https://www.adafruit.com/product/5450),
-we need 12V for this.
+we need 12V for the strip.
 
 DON'T send the 12V directly to the microcontroller!
 The RT6154 regulator on the pico board is only rated for up to 5.5V in.

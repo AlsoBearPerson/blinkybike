@@ -15,6 +15,8 @@
 // front - 38.25mm
 
 diam = 38.25;
+// Where the grip polygon goes: A smidge past the main circle,
+// for a bit of extra stability.
 offset = diam / 2 + 1.5;
 
 // Polygon shape for our "gripper" part:
@@ -36,6 +38,9 @@ p = [
 module clamp() {
     translate([offset, 0])
         polygon(p);
+    // To keep the gripper front from being pointy, add small circles.
+    // Though considering we're working at 1mm width here,
+    // printer filament physics probably would already round these for us.
     translate([offset + 12.5, 5.5])
         circle(d=1);
     translate([offset + 12.5, -5.5])
@@ -44,10 +49,16 @@ module clamp() {
 
 module 2dstuff() {
 difference() {
+    // Our material: Circular to grab the frame, and the clamp.
     union() {
+        // 1mm circle, for now. Will see how that holds up.
         circle(d=diam + 2);
         clamp();
     }
+    // Our keep-out: Leave room for the actual frame,
+    // then cut out on the opposite side of the clamp,
+    // leaving enough circle to weakly grip the frame,
+    // without forcing too much of a bend to clamp on.
     union() {
         circle(d=diam);
         polygon([[0, 0], [-30, 60], [-30, -60], [0, 0]]);
@@ -55,6 +66,7 @@ difference() {
 }
 }
 
+// Extrude all that 10mm wide. Chamfers left as an exercise to the reader.
 linear_extrude(10) {
     2dstuff();
 }
