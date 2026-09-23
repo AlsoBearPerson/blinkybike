@@ -2,15 +2,62 @@ use cyw43::{Cyw43439, aligned_bytes, bluetooth::BtDriver};
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_futures::{join::join, select::select};
 use embassy_rp::{
     Peri, dma,
     gpio::{Level, Output},
     peripherals::{DMA_CH2, DMA_CH3, PIN_23, PIN_24, PIN_25, PIN_29, PIO1},
     pio::Pio,
 };
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
+
+pub const UART_MSG_SIZE: usize = 20;
+pub type UartMessage = heapless::Vec<u8, UART_MSG_SIZE>;
+
+/// Holds messages from NUS for processing in our application
+static RX_CHAN: Channel<ThreadModeRawMutex, UartMessage, 10> = Channel::new();
+/// Holds messages from our application to be sent over NUS
+static TX_CHAN: Channel<ThreadModeRawMutex, UartMessage, 10> = Channel::new();
+
+pub fn try_send(v: UartMessage) {
+    // If we're full (as might happen with no central connected),
+    // drop the oldest message to make room for the new one.
+    if TX_CHAN.is_full() {
+        let _ = TX_CHAN.try_receive();
+    }
+    let _ = TX_CHAN.try_send(v);
+}
+
+pub fn get_receiver()
+-> embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, UartMessage, 10> {
+    return RX_CHAN.receiver();
+}
+
+// Manually place the large firmware blob into its own link section.
+// This allows using "--skip-section .firmware" with probe-rs on reflashing,
+// to save time when firmware blobs haven't changed.
+// For best results, you'll also want to tweak memory.x to place this section
+// at a fixed address, otherwise changes to program size will shift where
+// the linker places this object, requiring reflashing anyway.
+// A more elaborate trick would be to use rp235x's partition table feature,
+// and have picotool upload firmware once. But that's more tools involved,
+// and embassy-rp doesn't seem to have great support for navigating existing
+// partitions, yet. Also, partitions would round up sizes to 4K multiples,
+// unclear if the driver would be cool with that.
+//
+// Stable rust still doesn't like "const X: [u8; _] = ...",
+// so we have to be a bit silly to accurately size the array.
+const FW_LEN: usize = include_bytes!("../assets/cyw43-firmware/43439A0.bin").len();
+#[unsafe(link_section = ".firmware")]
+static FW: cyw43::Aligned<cyw43::A4, [u8; FW_LEN]> =
+    // Can't use the aligned_bytes! macro, as that returns a reference to an
+    // unsized type, which we couldn't deref and store into a static.
+    cyw43::Aligned(*include_bytes!("../assets/cyw43-firmware/43439A0.bin"));
+// We don't bother doing this with the other firmware blobs,
+// they're comparatively tiny, at 6K for btfw, vs. the 226K of this chonker.
 
 #[embassy_executor::task]
 pub async fn run_ble(
@@ -23,19 +70,10 @@ pub async fn run_ble(
     dma2: Peri<'static, DMA_CH3>,
     spawner: Spawner,
 ) {
-    let (fw, clm, btfw, nvram) = {
-        // IMPORTANT
-        //
-        // Download and make sure these files from https://github.com/embassy-rs/embassy/tree/main/cyw43-firmware
-        // are available in `./examples/rp-pico-2-w`. (should be automatic)
-        //
-        // IMPORTANT
-        let fw = aligned_bytes!("../assets/cyw43-firmware/43439A0.bin");
-        let clm = aligned_bytes!("../assets/cyw43-firmware/43439A0_clm.bin");
-        let btfw = aligned_bytes!("../assets/cyw43-firmware/43439A0_btfw.bin");
-        let nvram = aligned_bytes!("../assets/cyw43-firmware/nvram_rp2040.bin");
-        (fw, clm, btfw, nvram)
-    };
+    let fw = &FW;
+    let clm = aligned_bytes!("../assets/cyw43-firmware/43439A0_clm.bin");
+    let btfw = aligned_bytes!("../assets/cyw43-firmware/43439A0_btfw.bin");
+    let nvram = aligned_bytes!("../assets/cyw43-firmware/nvram_rp2040.bin");
 
     let pwr = Output::new(pwr, Level::Low);
     let cs = Output::new(cs, Level::High);
@@ -58,7 +96,7 @@ pub async fn run_ble(
         cyw43::new_with_bluetooth(state, pwr, spi, fw, btfw, nvram).await;
     spawner.spawn(unwrap!(cyw43_task(runner)));
     control.init(clm).await;
-    spawner.spawn(unwrap!(ble_stack(bt_device)));
+    spawner.spawn(unwrap!(ble_stack(bt_device, control)));
 }
 
 #[embassy_executor::task]
@@ -72,30 +110,18 @@ async fn cyw43_task(
     runner.run().await
 }
 
-#[embassy_executor::task]
-async fn blinky(mut control: cyw43::Control<'static>) {
-    let delay = Duration::from_millis(500);
-    loop {
-        control.gpio_set(0, true).await;
-        Timer::after(delay).await;
-        control.gpio_set(0, false).await;
-        Timer::after(delay).await;
-    }
-}
-
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 2;
 
 type ControllerType = ExternalController<BtDriver<'static>, 10>;
 
 #[embassy_executor::task]
-async fn ble_stack(bt_device: BtDriver<'static>) {
+async fn ble_stack(bt_device: BtDriver<'static>, control: cyw43::Control<'static>) {
     let controller: ControllerType = ExternalController::new(bt_device);
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)
-        //.set_random_address(address)
         .build();
     let mut runner = stack.runner();
     let mut runner_task = async move || {
@@ -107,7 +133,7 @@ async fn ble_stack(bt_device: BtDriver<'static>) {
     };
     let peripheral = stack.peripheral();
 
-    info!("Starting advertising and GATT service");
+    info!("[ble] starting advertising and GATT service");
     let server = unwrap!(Server::new_with_config(GapConfig::Peripheral(
         PeripheralConfig {
             name: "BlinkyBike",
@@ -115,12 +141,13 @@ async fn ble_stack(bt_device: BtDriver<'static>) {
         }
     )));
 
-    embassy_futures::join::join(runner_task(), advertise_loop(peripheral, server)).await;
+    join(runner_task(), advertise_loop(peripheral, server, control)).await;
 }
 
 async fn advertise_loop(
     mut peripheral: Peripheral<'_, ControllerType, DefaultPacketPool>,
     server: Server<'_>,
+    mut control: cyw43::Control<'static>,
 ) {
     loop {
         let mut advertiser_data = [0; 31];
@@ -144,20 +171,44 @@ async fn advertise_loop(
                 .await
         );
         info!("[adv] advertising");
-        let conn = advertiser
+        let conn = match advertiser
             .accept()
             .await
-            .unwrap()
-            .with_attribute_server(&server)
-            .unwrap();
+            .and_then(|c| c.with_attribute_server(&server))
+        {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("[adv] accept failed: {:?}", e);
+                Timer::after(Duration::from_millis(1000)).await;
+                continue;
+            }
+        };
         info!("[adv] connection established");
+        // Use the on-pcb LED to indicate "hey, someone's connected!"
+        control.gpio_set(0, true).await;
 
-        connected_loop(&server, conn).await;
+        select(tx_loop(&server, &conn), connected_loop(&server, &conn)).await;
+
+        control.gpio_set(0, false).await;
     }
 }
 
-async fn connected_loop(server: &Server<'_>, conn: GattConnection<'_, '_, DefaultPacketPool>) {
+// While connected, messages flow from our TX channel over the connection.
+async fn tx_loop(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacketPool>) {
     let tx = &server.uart_service.tx;
+    loop {
+        let msg = TX_CHAN.receive().await;
+        if let Err(e) = tx.notify(conn, &msg, true).await {
+            warn!("[gatt] Send failure: {:?}", e);
+            return;
+        }
+        // Give BLE time to transmit
+        Timer::after_millis(200).await;
+    }
+}
+
+async fn connected_loop(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacketPool>) {
+    let rx = &server.uart_service.rx;
     loop {
         match conn.next().await {
             GattConnectionEvent::Disconnected { reason } => {
@@ -166,14 +217,17 @@ async fn connected_loop(server: &Server<'_>, conn: GattConnection<'_, '_, Defaul
             }
             GattConnectionEvent::Gatt { event } => {
                 let reply = match event {
-                    GattEvent::Write(event) => {
-                        event.with_data(|_offset, data| {
+                    GattEvent::Write(event) if event.handle() == rx.handle() => {
+                        if let Ok(message) = event.with_data(|_offset, data| {
                             info!("Client says: {=[u8]:a}", data);
-                        });
-                        let v: heapless::Vec<u8, 20> = (*b"OK.\n").into();
-                        tx.notify(&conn, &v, true).await.unwrap();
+                            UartMessage::from_slice(data)
+                        }) {
+                            if RX_CHAN.try_send(message).is_err() {
+                                warn!("RX chan overflow");
+                            }
+                        }
                         event.accept()
-                    },
+                    }
                     _ => event.accept(),
                 };
                 match reply {
@@ -181,7 +235,7 @@ async fn connected_loop(server: &Server<'_>, conn: GattConnection<'_, '_, Defaul
                     Err(e) => warn!("[gatt] error sending response: {:?}", e),
                 }
             }
-            _ => ()
+            _ => (),
         }
     }
 }
@@ -193,11 +247,20 @@ struct Server {
 
 // Replicate nRF's proprietary "Nordic UART Service",
 // https://nrfconnectdocs.nordicsemi.com/ncs/latest/nrf/libraries/bluetooth/services/nus.html
-// as that has built in support from bluefruit etc.
+// as that has built in support from bluefruit/nRF Toolbox etc,
+// saving us from having to tangle with the mobile app dev/release process,
+// but still allowing for remote control via a common smartphone.
+//
+// It's really not a particularly complicated service.
+//
+// Eventually we should probably add some sort of auth, though...
 #[gatt_service(uuid = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")]
 struct UartService {
+    // RX is values being written at us. We don't bother to reply.
     #[characteristic(uuid = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E", write_without_response)]
-    rx: heapless::Vec<u8, 20>,
+    rx: UartMessage,
+    // TX is values being notified back, though curiously bluefruit
+    // doesn't like this - do we need to support read, too?
     #[characteristic(uuid = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E", notify)]
-    tx: heapless::Vec<u8, 20>,
+    tx: UartMessage,
 }

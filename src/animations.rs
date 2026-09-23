@@ -9,8 +9,8 @@
 // But we might consider tightening it to I4F12, perhaps,
 // and having code expand that when needed.
 
+#[allow(unused)]
 use defmt::*;
-use fixed::prelude::*;
 use fixed::types::*;
 use smart_leds::RGB8;
 
@@ -65,6 +65,9 @@ trait PixelMapper {
 trait ColorLookup {
     fn to_color(&self, offset: I8F24) -> RGB8;
 }
+pub trait CanAdvance {
+    fn advance(&mut self);
+}
 
 impl<LM, PM, CL> StatelessAnimation<LM, PM, CL>
 where
@@ -73,10 +76,8 @@ where
     CL: ColorLookup,
 {
     fn get(&self, time: I8F24, led: usize) -> RGB8 {
-        // We spell out fixed types explicitly, otherwise vscode likes to inlay-hint
-        // them as an unhelpful FixedI32<UInt<UInt<UInt<...>>> raw type.
-        let led: I8F24 = self.lm.remap(led);
-        let offset: I8F24 = self.pm.remap(time, led);
+        let led = self.lm.remap(led);
+        let offset = self.pm.remap(time, led);
         if offset < 0 || offset > 1 {
             return RGB8::default();
         }
@@ -99,8 +100,21 @@ where
     }
 }
 
+impl<LM, PM, CL> CanAdvance for StatelessAnimation<LM, PM, CL>
+where
+    LM: LedMapper,
+    PM: PixelMapper,
+    CL: ColorLookup,
+    CL: CanAdvance,
+{
+    fn advance(&mut self) {
+        self.cl.advance();
+    }
+}
+
 // Basic linear mapping, assuming a fixed LED layout.
 // Will exceed intended range if the number of LEDs requested differs.
+#[allow(unused)]
 pub struct Linear<const NUM_LEDS: usize>;
 impl<const NUM_LEDS: usize> LedMapper for Linear<NUM_LEDS> {
     fn remap(&self, led: usize) -> I8F24 {
@@ -211,6 +225,30 @@ impl ColorLookup for FlagLookup {
     }
 }
 
+struct ManyFlags {
+    flags: &'static [&'static [RGB8]],
+    cur_index: usize,
+}
+impl ManyFlags {
+    fn new(flags: &'static [&'static [smart_leds::RGB<u8>]]) -> Self {
+        Self {
+            flags,
+            cur_index: 0,
+        }
+    }
+}
+impl ColorLookup for ManyFlags {
+    fn to_color(&self, offset: I8F24) -> RGB8 {
+        let flag = self.flags[self.cur_index];
+        return FlagLookup(flag).to_color(offset);
+    }
+}
+impl CanAdvance for ManyFlags {
+    fn advance(&mut self) {
+        self.cur_index = (self.cur_index + 1) % self.flags.len();
+    }
+}
+
 // An interpolating lookup, where 0 is the first color,
 // multiples of 1/colors.len() are corresponding indices,
 // and values in between linearly blend adjacent colors.
@@ -257,109 +295,13 @@ pub fn smoothwheel<LM: LedMapper>(lm: LM, colors: &'static [RGB8]) -> impl Anima
     }
 }
 
-pub fn flag<LM: LedMapper>(lm: LM, colors: &'static [RGB8]) -> impl Animation {
+pub fn many_flag<LM: LedMapper>(
+    lm: LM,
+    flags: &'static [&'static [RGB8]],
+) -> impl Animation + CanAdvance {
     StatelessAnimation {
         lm,
         pm: SlideGap,
-        cl: FlagLookup(colors),
-    }
-}
-
-// A container that can hold multiple animations.
-// Does not use dyn dispatch or heap, instead performs manual dispatch
-// into the currently active animation.
-// Holds enough storage for the largest state among contained animations.
-pub struct ManyAnim<A0: Animation, A1: Animation, A2: Animation, A3: Animation> {
-    fade: U8F8,
-
-    // Handles for the different animations,
-    // many of these will likely be zero-sized.
-    a: (A0, A1, A2, A3),
-
-    // The currently active animation and its state.
-    s: AnimState<A0, A1, A2, A3>,
-}
-enum AnimState<A0: Animation, A1: Animation, A2: Animation, A3: Animation> {
-    A0(A0::State),
-    A1(A1::State),
-    A2(A2::State),
-    A3(A3::State),
-}
-
-impl<A0: Animation, A1: Animation, A2: Animation, A3: Animation> ManyAnim<A0, A1, A2, A3> {
-    pub fn index(&self) -> usize {
-        self.s.index()
-    }
-
-    pub fn set_index(&mut self, index: usize) {
-        self.s.set_index(index);
-    }
-
-    pub fn advance(&mut self) {
-        self.set_index(self.index() + 1);
-    }
-
-    pub fn set_fade(&mut self, fade: U8F8) {
-        self.fade = fade;
-    }
-
-    pub fn new(a0: A0, a1: A1, a2: A2, a3: A3) -> Self {
-        Self {
-            fade: U8F8::ONE,
-            a: (a0, a1, a2, a3),
-            s: AnimState::default(),
-        }
-    }
-
-    pub fn frame(&mut self, time: I8F24, leds: &mut [RGB8]) {
-        self.s.frame(&self.a, time, leds);
-
-        for led in leds {
-            // Fade each LED by multiplying each color channel with the requested fade.
-            // For fades greater than 1, this may saturate some channels at 255,
-            // which will likely alter the resulting hue.
-            *led = led
-                .iter()
-                .map(|c| self.fade.wide_mul(U8F8::from(c)).saturating_to_num())
-                .collect();
-        }
-    }
-}
-
-impl<A0: Animation, A1: Animation, A2: Animation, A3: Animation> AnimState<A0, A1, A2, A3> {
-    fn index(&self) -> usize {
-        match self {
-            AnimState::A0(_) => 0,
-            AnimState::A1(_) => 1,
-            AnimState::A2(_) => 2,
-            AnimState::A3(_) => 3,
-        }
-    }
-
-    fn set_index(&mut self, index: usize) {
-        *self = match index {
-            0 => AnimState::A0(Default::default()),
-            1 => AnimState::A1(Default::default()),
-            2 => AnimState::A2(Default::default()),
-            3 => AnimState::A3(Default::default()),
-            _ => AnimState::default(),
-        }
-    }
-
-    fn frame(&mut self, a: &(A0, A1, A2, A3), time: I8F24, leds: &mut [RGB8]) {
-        match self {
-            AnimState::A0(s) => a.0.frame(s, time, leds),
-            AnimState::A1(s) => a.1.frame(s, time, leds),
-            AnimState::A2(s) => a.2.frame(s, time, leds),
-            AnimState::A3(s) => a.3.frame(s, time, leds),
-        };
-    }
-}
-
-impl<A0: Animation, A1: Animation, A2: Animation, A3: Animation> Default
-    for AnimState<A0, A1, A2, A3>
-{
-    fn default() -> Self {
-        AnimState::A0(Default::default())
+        cl: ManyFlags::new(flags),
     }
 }

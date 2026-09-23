@@ -7,5 +7,6 @@ runner = "probe-rs run --chip RP235x"
 target = "thumbv8m.main-none-eabihf"
 
 [env]
-DEFMT_LOG = "debug"
+# The cyw43 crate is quite chatty on debug, logging all HCI traffic.
+DEFMT_LOG = "debug,cyw43=info"
 PROBE_RS_CHIP = "rp235x"

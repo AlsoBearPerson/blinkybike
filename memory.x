@@ -1,10 +1,24 @@
 MEMORY {
     /*
-     * The RP2350 has either external or internal flash.
+     * On the Pi Pico 2 W, we have 4MiB of flash on the PCB.
      *
-     * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
+     * Following the common memory.x reused across projects,
+     * we allow the linker to freely place text and rodata type content
+     * into the first 2MiB of that space.
      */
     FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
+
+    /*
+     * Carve out the next 1MiB flash as our fixed-location firmware stash space,
+     * the main firmware blob uses 226KiB of that, currently.
+     */
+    EXTRA_FLASH : ORIGIN = 0x10200000, LENGTH = 1M
+
+    /*
+     * Final 1MiB of flash left intentionally unused,
+     * for potential runtime use for BLE pairing keys or other persistent state.
+     */
+
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -73,3 +87,13 @@ SECTIONS {
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
+
+/*
+ * Place things marked as firmware blobs in our firmware stash space
+ */
+SECTIONS {
+    .firmware : ALIGN(4)
+    {
+        KEEP(*(.firmware));
+    } > EXTRA_FLASH
+} INSERT AFTER .end_block;
