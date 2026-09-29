@@ -149,8 +149,6 @@ impl<const N1_LEDS: usize, const N2_LEDS: usize> LedMapper for LinRev<N1_LEDS, N
 struct Slide;
 impl PixelMapper for Slide {
     fn remap(&self, time: I8F24, led: I8F24) -> I8F24 {
-        // For now, we repeat 6 times for each time strobe.
-        let time: I8F24 = time * 6 % 1;
         let result: I8F24 = time - led;
         if result < 0 {
             return result + I8F24::ONE;

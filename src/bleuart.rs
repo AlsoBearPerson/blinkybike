@@ -2,7 +2,7 @@ use cyw43::{Cyw43439, aligned_bytes, bluetooth::BtDriver};
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::{join::join, select::select};
+use embassy_futures::select::select;
 use embassy_rp::{
     Peri, dma,
     gpio::{Level, Output},
@@ -14,7 +14,7 @@ use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
-pub const UART_MSG_SIZE: usize = 20;
+pub const UART_MSG_SIZE: usize = 100;
 pub type UartMessage = heapless::Vec<u8, UART_MSG_SIZE>;
 
 /// Holds messages from NUS for processing in our application
@@ -55,6 +55,9 @@ const FW_LEN: usize = include_bytes!("../assets/cyw43-firmware/43439A0.bin").len
 static FW: cyw43::Aligned<cyw43::A4, [u8; FW_LEN]> =
     // Can't use the aligned_bytes! macro, as that returns a reference to an
     // unsized type, which we couldn't deref and store into a static.
+    // We need our static to be exactly the value in place, not merely
+    // a reference to some compile-time constant, otherwise our link_section
+    // override would merely place the reference, not its pointed-to value.
     cyw43::Aligned(*include_bytes!("../assets/cyw43-firmware/43439A0.bin"));
 // We don't bother doing this with the other firmware blobs,
 // they're comparatively tiny, at 6K for btfw, vs. the 226K of this chonker.
@@ -94,13 +97,13 @@ pub async fn run_ble(
     let state = STATE.init(cyw43::State::new());
     let (_net_device, bt_device, mut control, runner) =
         cyw43::new_with_bluetooth(state, pwr, spi, fw, btfw, nvram).await;
-    spawner.spawn(unwrap!(cyw43_task(runner)));
+    spawner.spawn(unwrap!(cyw43_runner(runner)));
     control.init(clm).await;
-    spawner.spawn(unwrap!(ble_stack(bt_device, control)));
+    spawner.spawn(unwrap!(ble_stack(bt_device, control, spawner)));
 }
 
 #[embassy_executor::task]
-async fn cyw43_task(
+async fn cyw43_runner(
     runner: cyw43::Runner<
         'static,
         cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO1, 0>>,
@@ -116,22 +119,21 @@ const L2CAP_CHANNELS_MAX: usize = 2;
 type ControllerType = ExternalController<BtDriver<'static>, 10>;
 
 #[embassy_executor::task]
-async fn ble_stack(bt_device: BtDriver<'static>, control: cyw43::Control<'static>) {
+async fn ble_stack(
+    bt_device: BtDriver<'static>,
+    control: cyw43::Control<'static>,
+    spawner: Spawner,
+) {
     let controller: ControllerType = ExternalController::new(bt_device);
-
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
-        HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources)
-        .build();
-    let mut runner = stack.runner();
-    let mut runner_task = async move || {
-        loop {
-            if let Err(e) = runner.run().await {
-                defmt::panic!("[ble_task] error: {:?}", defmt::Debug2Format(&e));
-            }
-        }
-    };
-    let peripheral = stack.peripheral();
+    // Even though HostResources has a const, no-args new(),
+    // it's not Send, so we need to wrap a StaticCell around it anyway.
+    static RESOURCES: StaticCell<
+        HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX>,
+    > = StaticCell::new();
+    static STACK: StaticCell<Stack<'static, ControllerType, DefaultPacketPool>> = StaticCell::new();
+    let stack =
+        STACK.init(trouble_host::new(controller, RESOURCES.init(HostResources::new())).build());
+    spawner.spawn(unwrap!(stack_runner(stack.runner())));
 
     info!("[ble] starting advertising and GATT service");
     let server = unwrap!(Server::new_with_config(GapConfig::Peripheral(
@@ -140,13 +142,22 @@ async fn ble_stack(bt_device: BtDriver<'static>, control: cyw43::Control<'static
             appearance: &appearance::cycling::GENERIC_CYCLING,
         }
     )));
-
-    join(runner_task(), advertise_loop(peripheral, server, control)).await;
+    spawner.spawn(unwrap!(advertise_loop(stack.peripheral(), server, control)));
 }
 
+#[embassy_executor::task]
+async fn stack_runner(mut runner: Runner<'static, ControllerType, DefaultPacketPool>) {
+    loop {
+        if let Err(e) = runner.run().await {
+            defmt::panic!("[ble_task] error: {:?}", defmt::Debug2Format(&e));
+        }
+    }
+}
+
+#[embassy_executor::task]
 async fn advertise_loop(
-    mut peripheral: Peripheral<'_, ControllerType, DefaultPacketPool>,
-    server: Server<'_>,
+    mut peripheral: Peripheral<'static, ControllerType, DefaultPacketPool>,
+    server: Server<'static>,
     mut control: cyw43::Control<'static>,
 ) {
     loop {
@@ -200,7 +211,7 @@ async fn tx_loop(server: &Server<'_>, conn: &GattConnection<'_, '_, DefaultPacke
         let msg = TX_CHAN.receive().await;
         if let Err(e) = tx.notify(conn, &msg, true).await {
             warn!("[gatt] Send failure: {:?}", e);
-            return;
+            return; // Which will end select(), terminating the connection.
         }
         // Give BLE time to transmit
         Timer::after_millis(200).await;
@@ -220,11 +231,14 @@ async fn connected_loop(server: &Server<'_>, conn: &GattConnection<'_, '_, Defau
                     GattEvent::Write(event) if event.handle() == rx.handle() => {
                         if let Ok(message) = event.with_data(|_offset, data| {
                             info!("Client says: {=[u8]:a}", data);
+                            // Make an owned copy to survive past the with_data() call.
                             UartMessage::from_slice(data)
                         }) {
                             if RX_CHAN.try_send(message).is_err() {
                                 warn!("RX chan overflow");
                             }
+                        } else {
+                            warn!("RX message too large");
                         }
                         event.accept()
                     }
@@ -259,8 +273,7 @@ struct UartService {
     // RX is values being written at us. We don't bother to reply.
     #[characteristic(uuid = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E", write_without_response)]
     rx: UartMessage,
-    // TX is values being notified back, though curiously bluefruit
-    // doesn't like this - do we need to support read, too?
+    // TX is values being notified back.
     #[characteristic(uuid = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E", notify)]
     tx: UartMessage,
 }

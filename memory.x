@@ -2,7 +2,7 @@ MEMORY {
     /*
      * On the Pi Pico 2 W, we have 4MiB of flash on the PCB.
      *
-     * Following the common memory.x reused across projects,
+     * Following the common memory.x from various examples,
      * we allow the linker to freely place text and rodata type content
      * into the first 2MiB of that space.
      */
@@ -89,11 +89,13 @@ PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
 
 /*
- * Place things marked as firmware blobs in our firmware stash space
+ * Place things marked as firmware blobs in our firmware stash space.
+ * This is not included in the end block above,
+ * as it maybe shouldn't be part of the binary signature [citation needed].
  */
 SECTIONS {
     .firmware : ALIGN(4)
     {
-        KEEP(*(.firmware));
+        *(.firmware);  /* No need to KEEP(), if it's unused we don't need it. */
     } > EXTRA_FLASH
 } INSERT AFTER .end_block;

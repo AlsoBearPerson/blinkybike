@@ -96,19 +96,19 @@ const SPEED_FACTOR: I8F24 = I8F24::lit("1.5");
 
 async fn handle_command(cmd: &[u8]) -> UartMessage {
     match cmd {
-        b"B--" => shrink_cmd(&FADE_LEVEL, FADE_FACTOR, "Darker", "Too dark!"),
+        b"B--" => shrink_cmd(&FADE_LEVEL, FADE_FACTOR, "Darker", b"Too dark!"),
         b"B++" => grow_cmd(
             &FADE_LEVEL,
             FADE_FACTOR,
             U8F8::ONE,
             "Brighter",
-            "Max bright!",
+            b"Max bright!",
         ),
         b"S--" => {
             if clear_paused() {
                 return (*b"Unpaused.").into();
             }
-            shrink_cmd(&TIME_MULT, SPEED_FACTOR, "Slower", "Too slow!")
+            shrink_cmd(&TIME_MULT, SPEED_FACTOR, "Slower", b"Too slow!")
         }
         b"S++" => {
             if clear_paused() {
@@ -119,7 +119,7 @@ async fn handle_command(cmd: &[u8]) -> UartMessage {
                 SPEED_FACTOR,
                 10.into(),
                 "Faster",
-                "Ludicrous speed!",
+                b"Ludicrous speed!",
             )
         }
         b"PAUSE" => {
@@ -142,39 +142,40 @@ async fn handle_command(cmd: &[u8]) -> UartMessage {
     }
 }
 
-fn shrink_cmd<F: AtomicFixed>(
+fn shrink_cmd<F: AtomicFixed, const L: usize>(
     holder: &F,
     factor: F::Value,
     msg: &str,
-    underflow_msg: &str,
+    underflow_msg: &[u8; L],
 ) -> UartMessage {
     let cur = holder.get() / factor;
     if cur > 0 {
         holder.set(cur);
         changemsg(msg, cur)
     } else {
-        unwrap!(underflow_msg.as_bytes().try_into())
+        (*underflow_msg).into()
     }
 }
 
-fn grow_cmd<F: AtomicFixed>(
+fn grow_cmd<F: AtomicFixed, const L: usize>(
     holder: &F,
     factor: F::Value,
     max: F::Value,
     msg: &str,
-    overflow_msg: &str,
+    overflow_msg: &[u8; L],
 ) -> UartMessage {
     let cur = holder.get();
     let mut val = cur.saturating_mul(factor);
     if val == cur && val < F::Value::MAX {
-        // Handle edge case of 0x0.01 * 0x1.1 truncating back to 0x0.01
+        // Handle edge case of 0x0.01 * 0x1.8 truncating back to 0x0.01
         val += F::Value::DELTA;
     }
-    let mut result: UartMessage = changemsg(msg, val);
-    if val >= max {
+    let result = if val < max {
+        changemsg(msg, val)
+    } else {
         val = max;
-        result = unwrap!(overflow_msg.as_bytes().try_into());
-    }
+        (*overflow_msg).into()
+    };
     holder.set(val);
     result
 }
@@ -184,11 +185,15 @@ fn changemsg(msg: &str, val: impl Fixed + defmt::Format) -> UartMessage {
         str.into_bytes()
     } else {
         warn!("Fmt overflow: {:?} / {:?}", msg, val);
-        unwrap!(msg.as_bytes().try_into())
+        msg.as_bytes()
+            .try_into()
+            .unwrap_or((*b"No room to explain!").into())
     }
 }
 
+#[allow(unused)]
 const GAMMA8: [u8; 256] = color_parse::srgb_to_linear_table!();
+#[allow(unused)]
 const fn gamma(c: RGB8) -> RGB8 {
     RGB8 {
         r: GAMMA8[c.r as usize],
@@ -197,25 +202,29 @@ const fn gamma(c: RGB8) -> RGB8 {
     }
 }
 
-#[rustfmt::skip]
-#[allow(unused)]
 mod flags {
-use smart_leds::RGB8;
-use color_parse::colors_linear;
-pub const FLAG_PRIDE:        [RGB8; 6] = colors_linear![ #E40303, #FF8C00, #FFED00, #008026, #004CFF, #732982];
-pub const FLAG_TRAAANS:      [RGB8; 5] = colors_linear![ #5BCEFA, #F5A9B8, #FFFFFF, #F5A9B8, #5BCEFA];
-pub const FLAG_LESSBEANS:    [RGB8; 7] = colors_linear![ #D52D00, #EF7627, #FF9A56, #FFFFFF, #D162A4, #B55690, #A30262];
-pub const FLAG_BI_CYCLE:     [RGB8; 5] = colors_linear![ #D60270, #D60270, #9B4F96, #0038A8, #0038A8];
-// Welp, good luck displaying "black" on a self-lit medium.
-// Gotta have this one, though.
-pub const FLAG_NUMEROUSBEES: [RGB8; 4] = colors_linear![ #FCF434, #FFFFFF, #9C59D1, #2C2C2C];
-pub const FLAG_PANPANPAN:    [RGB8; 3] = colors_linear![ #FF218C, #FFD800, #21B1FF];
+    use color_parse::colors_linear;
+    use smart_leds::RGB8;
+    pub const FLAG_PRIDE: [RGB8; 6] =
+        colors_linear![ #E40303, #FF8C00, #FFED00, #008026, #004CFF, #732982];
+    pub const FLAG_TRAAANS: [RGB8; 5] =
+        colors_linear![ #5BCEFA, #F5A9B8, #FFFFFF, #F5A9B8, #5BCEFA];
+    pub const FLAG_LESSBEANS: [RGB8; 7] =
+        colors_linear![ #D52D00, #EF7627, #FF9A56, #FFFFFF, #D162A4, #B55690, #A30262];
+    pub const FLAG_BI_CYCLE: [RGB8; 5] =
+        colors_linear![ #D60270, #D60270, #9B4F96, #0038A8, #0038A8];
+    // Welp, good luck displaying "black" on a self-lit medium.
+    // Gotta have this one, though.
+    pub const FLAG_NUMEROUSBEES: [RGB8; 4] = colors_linear![ #FCF434, #FFFFFF, #9C59D1, #2C2C2C];
+    pub const FLAG_PANPANPAN: [RGB8; 3] = colors_linear![ #FF218C, #FFD800, #21B1FF];
 
-pub const FLAG_GLETSCHER:    [RGB8; 6] = colors_linear![ #005CB9, #F38B00, #F4CD00, #FFFFFF, #009BDE, #005CB9 ];
+    // Long story.
+    pub const FLAG_GLETSCHER: [RGB8; 6] =
+        colors_linear![ #005CB9, #F38B00, #F4CD00, #FFFFFF, #009BDE, #005CB9 ];
 
-// A walk through Oklch(0.7, 0.15, x) with small tweaks,
-// see extras/wheelscan.py
-pub const WHEEL_OKLAB_07:   [RGB8; 16] = colors_linear![ #E8729B, #ED7472, #E97C48, #DB8912, #C19905, #A1A717, #74B34C, #30BA79, #00B8A1, #01B4BF, #05AFDC, #43A5F6, #7A98FC, #A28BF3, #C17FDE, #D977C0];
+    // A walk through Oklch(0.7, 0.15, x) with small tweaks,
+    // see extras/wheelscan.py
+    pub const WHEEL_OKLAB_07: [RGB8; 16] = colors_linear![ #E8729B, #ED7472, #E97C48, #DB8912, #C19905, #A1A717, #74B34C, #30BA79, #00B8A1, #01B4BF, #05AFDC, #43A5F6, #7A98FC, #A28BF3, #C17FDE, #D977C0];
 }
 
 static FADE_LEVEL: AtomicU8F8 = AtomicU8F8::new(U8F8::lit("0.5"));
@@ -228,13 +237,16 @@ fn is_paused() -> bool {
 fn flip_paused() -> bool {
     PAUSED.fetch_not(Relaxed)
 }
+// Ensures PAUSED=false, returning whether we were paused before.
 fn clear_paused() -> bool {
     PAUSED.swap(false, Relaxed)
 }
 static FAST_FORWARD: AtomicBool = AtomicBool::new(false);
+// Ensures FAST_FORWARD=false, returning whether it was true before.
 fn clear_fastforward() -> bool {
     FAST_FORWARD.swap(false, Relaxed)
 }
+// Ensures FAST_FORWARD=true, returning whether it was already true before.
 fn set_fastforward() -> bool {
     FAST_FORWARD.swap(true, Relaxed)
 }
@@ -277,6 +289,7 @@ fn duration_to_secs(d: Duration) -> I8F24 {
         ticks_per_s >>= 1;
     }
     if ticks_per_s == 0 {
+        // Many ticks, left side.
         return I8F24::MAX;
     }
     let ticks = U32F0::from_num(ticks);
@@ -377,14 +390,14 @@ async fn consumer(
 
 // A small ergonomics helper for zerocopy channels:
 // Awaits an available send slot, runs the passed closure on it,
-// then automatically marks the value as ready.
+// marks the value as ready once it returns.
 async fn run_send<M, T, R, F>(s: &mut zerocopy_channel::Sender<'static, M, T>, f: F) -> R
 where
     F: FnOnce(&mut T) -> R,
     M: RawMutex,
 {
     let mut slot = s.send().await;
-    let result = f(&mut *slot);
+    let result = f(&mut *slot); // Explicitly unwrap the smart pointer
     slot.send_done();
     return result;
 }

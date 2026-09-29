@@ -39,8 +39,9 @@ Mine's acoustic (not electric, powered entirely by my own two legs).
 
 Using a [Pi Pico 2W](https://www.raspberrypi.com/products/raspberry-pi-pico-2/?variant=pico-2-w).
 
-Not using the wireless bits yet,
-plan is to allow remote control with a smartphone UI via BLE, eventually.
+It's more than enough power for what we need,
+and BLE support means we can make a control UI driven by a common smartphone,
+rather than having to wire up and attach our own switches/buttons/knobs.
 
 ### Blinky Bits
 
