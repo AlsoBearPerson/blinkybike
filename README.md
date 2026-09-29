@@ -105,6 +105,23 @@ Just in case, make sure to common ground lines together.
 This entire setup could work off some AA batteries, or some custom
 LiPo setup if you're feeling spicy, powerbank was just the easiest option.
 
+### A smartphone
+
+Using our BLE functionality, we can alter some basic parameters at runtime,
+without having to get out a laptop and re-flash the pico.
+
+For now, the protocol we're using is nRF's proprietary "Nordic UART",
+which seems to be relatively common as a low-complexity hobby build thing.
+
+To interact with it, I've gotten the best results from the
+[nRF Toolbox](https://www.nordicsemi.com/Products/Development-tools/nRF-Toolbox)
+app, which comes with a handy little button grid,
+so you can pre-program commands to send with one press.
+It is probably also compatible with
+[Bluefruit Connect](https://play.google.com/store/apps/details?id=com.adafruit.bluefruit.le.connect.v4)
+now, which might be easier to get started,
+and may have more useful functions for prototyping.
+
 ### Sensing
 
 None of this is being used yet,
