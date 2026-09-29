@@ -43,6 +43,19 @@ It's more than enough power for what we need,
 and BLE support means we can make a control UI driven by a common smartphone,
 rather than having to wire up and attach our own switches/buttons/knobs.
 
+### Debug Probe
+
+Not strictly necessary, but very useful for troubleshooting,
+I'd highly recommend grabbing a [Pi Debug Probe](https://www.raspberrypi.com/products/debug-probe/),
+which can connect to the SWD interface on the pico.
+This allows both debugging, and also just reflashing the pico anytime
+without having to reboot or fiddle with BOOTSEL buttons.
+
+Then you'll want to grab [probe.rs](https://probe.rs/)
+which can upload and run builds, and interface with the `defmt` and `RTT` shenanigans,
+so you get cheap accurate logging and even panic stacktraces,
+even though you're running on a microcontroller.
+
 ### Blinky Bits
 
 I'm using a [LED fake-neon-tube strip](https://www.adafruit.com/product/3869).
@@ -121,6 +134,15 @@ It is probably also compatible with
 [Bluefruit Connect](https://play.google.com/store/apps/details?id=com.adafruit.bluefruit.le.connect.v4)
 now, which might be easier to get started,
 and may have more useful functions for prototyping.
+
+The accepted commands are going to change frequently,
+so look for `handle_command` in [the source](https://github.com/AlsoBearPerson/blinkybike/blob/main/src/main.rs#L97)
+for a list.
+
+As of now, there's no authentication of any kind,
+other than the software only accepting one connected central host at a time.
+So there is a risk of random other folks nearby hijacking control,
+if they know what to look for, and really want to control brightness/speed.
 
 ### Sensing
 

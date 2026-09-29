@@ -15,7 +15,7 @@ use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
 pub const UART_MSG_SIZE: usize = 100;
-pub type UartMessage = heapless::Vec<u8, UART_MSG_SIZE>;
+pub type UartMessage = heapless::String<UART_MSG_SIZE>;
 
 /// Holds messages from NUS for processing in our application
 static RX_CHAN: Channel<ThreadModeRawMutex, UartMessage, 10> = Channel::new();
@@ -229,16 +229,15 @@ async fn connected_loop(server: &Server<'_>, conn: &GattConnection<'_, '_, Defau
             GattConnectionEvent::Gatt { event } => {
                 let reply = match event {
                     GattEvent::Write(event) if event.handle() == rx.handle() => {
-                        if let Ok(message) = event.with_data(|_offset, data| {
-                            info!("Client says: {=[u8]:a}", data);
-                            // Make an owned copy to survive past the with_data() call.
-                            UartMessage::from_slice(data)
-                        }) {
+                        if let Ok(message) = event.value(rx) {
+                            info!("Client says: {=str:?}", message.as_str());
                             if RX_CHAN.try_send(message).is_err() {
                                 warn!("RX chan overflow");
                             }
                         } else {
-                            warn!("RX message too large");
+                            event.with_data(|_offset, data| {
+                                warn!("Client garbage: {=[u8]:a}", data);
+                            });
                         }
                         event.accept()
                     }

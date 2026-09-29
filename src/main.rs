@@ -81,89 +81,93 @@ async fn process_commands() -> ! {
     let r = bleuart::get_receiver();
     loop {
         let v = r.receive().await;
-        let v = v.as_slice();
-        let v = v.strip_suffix(b"\n").unwrap_or(v);
-        let reply = handle_command(v).await;
-        if reply.is_empty() {
-            continue;
+        for cmd in v.split('\n') {
+            match handle_command(cmd).await {
+                Ok(x) if x.is_empty() => (),
+                Ok(reply) => bleuart::try_send(reply),
+                Err(_) => warn!("Reply dropped, too large"),
+            };
         }
-        bleuart::try_send(reply);
     }
 }
 
 const FADE_FACTOR: U8F8 = U8F8::lit("1.5");
 const SPEED_FACTOR: I8F24 = I8F24::lit("1.5");
 
-async fn handle_command(cmd: &[u8]) -> UartMessage {
+// Handling heapless::String is a tad inconvenient,
+// as there's no infallible way to convert string literals to heapless strings.
+// So for implementation convenience, we drag the Result type around,
+// expecting no error unless something went very wrong.
+async fn handle_command(cmd: &str) -> Result<UartMessage, heapless::CapacityError> {
     match cmd {
-        b"B--" => shrink_cmd(&FADE_LEVEL, FADE_FACTOR, "Darker", b"Too dark!"),
-        b"B++" => grow_cmd(
+        "B--" => shrink_cmd(&FADE_LEVEL, FADE_FACTOR, "Darker", "Too dark!"),
+        "B++" => grow_cmd(
             &FADE_LEVEL,
             FADE_FACTOR,
             U8F8::ONE,
             "Brighter",
-            b"Max bright!",
+            "Max bright!",
         ),
-        b"S--" => {
+        "S--" => {
             if clear_paused() {
-                return (*b"Unpaused.").into();
+                return "Unpaused.".try_into();
             }
-            shrink_cmd(&TIME_MULT, SPEED_FACTOR, "Slower", b"Too slow!")
+            shrink_cmd(&TIME_MULT, SPEED_FACTOR, "Slower", "Too slow!")
         }
-        b"S++" => {
+        "S++" => {
             if clear_paused() {
-                return (*b"Unpaused.").into();
+                return "Unpaused.".try_into();
             }
             grow_cmd(
                 &TIME_MULT,
                 SPEED_FACTOR,
                 10.into(),
                 "Faster",
-                b"Ludicrous speed!",
+                "Ludicrous speed!",
             )
         }
-        b"PAUSE" => {
+        "PAUSE" => {
             let val = flip_paused();
             if val {
-                (*b"Unpaused.").into()
+                "Unpaused.".try_into()
             } else {
-                (*b"Paused.").into()
+                "Paused.".try_into()
             }
         }
-        b"NEXT" => {
+        "NEXT" => {
             let val = set_fastforward();
             if val {
-                (*b"Stuck?").into()
+                "Stuck?".try_into()
             } else {
-                (*b"Go next.").into()
+                "Go next.".try_into()
             }
         }
-        _ => (*b"???").into(),
+        _ => "???".try_into(),
     }
 }
 
-fn shrink_cmd<F: AtomicFixed, const L: usize>(
+fn shrink_cmd<F: AtomicFixed>(
     holder: &F,
     factor: F::Value,
     msg: &str,
-    underflow_msg: &[u8; L],
-) -> UartMessage {
+    underflow_msg: &str,
+) -> Result<UartMessage, heapless::CapacityError> {
     let cur = holder.get() / factor;
     if cur > 0 {
         holder.set(cur);
         changemsg(msg, cur)
     } else {
-        (*underflow_msg).into()
+        underflow_msg.try_into()
     }
 }
 
-fn grow_cmd<F: AtomicFixed, const L: usize>(
+fn grow_cmd<F: AtomicFixed>(
     holder: &F,
     factor: F::Value,
     max: F::Value,
     msg: &str,
-    overflow_msg: &[u8; L],
-) -> UartMessage {
+    overflow_msg: &str,
+) -> Result<UartMessage, heapless::CapacityError> {
     let cur = holder.get();
     let mut val = cur.saturating_mul(factor);
     if val == cur && val < F::Value::MAX {
@@ -174,21 +178,20 @@ fn grow_cmd<F: AtomicFixed, const L: usize>(
         changemsg(msg, val)
     } else {
         val = max;
-        (*overflow_msg).into()
+        overflow_msg.try_into()
     };
     holder.set(val);
     result
 }
 
-fn changemsg(msg: &str, val: impl Fixed + defmt::Format) -> UartMessage {
-    if let Ok(str) = format!("{}->{:X}", msg, val) {
-        str.into_bytes()
-    } else {
-        warn!("Fmt overflow: {:?} / {:?}", msg, val);
-        msg.as_bytes()
-            .try_into()
-            .unwrap_or((*b"No room to explain!").into())
-    }
+fn changemsg(
+    msg: &str,
+    val: impl Fixed + defmt::Format,
+) -> Result<UartMessage, heapless::CapacityError> {
+    format!("{}->{:X}", msg, val).or_else(|_| {
+        warn!("Fmt fail/overflow: {:?} / {:?}", msg, val);
+        msg.try_into()
+    })
 }
 
 #[allow(unused)]
