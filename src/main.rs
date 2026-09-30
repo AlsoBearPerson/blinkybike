@@ -137,6 +137,8 @@ async fn handle_command(cmd: &str) -> Result<UartMessage, heapless::CapacityErro
         "NEXT" => {
             let val = set_fastforward();
             if val {
+                // Fastforward should clear itself promptly on the next animation frame.
+                // If we ever find it already set, something strange might be afoot.
                 "Stuck?".try_into()
             } else {
                 "Go next.".try_into()
@@ -227,11 +229,25 @@ mod flags {
 
     // A walk through Oklch(0.7, 0.15, x) with small tweaks,
     // see extras/wheelscan.py
-    pub const WHEEL_OKLAB_07: [RGB8; 16] = colors_linear![ #E8729B, #ED7472, #E97C48, #DB8912, #C19905, #A1A717, #74B34C, #30BA79, #00B8A1, #01B4BF, #05AFDC, #43A5F6, #7A98FC, #A28BF3, #C17FDE, #D977C0];
+    // Makes for arguably a more visually pleasant "color wheel"
+    // than just a raw max-RGB wheel,
+    // even if it's not as overwhelmingly saturated.
+    pub const WHEEL_OKLAB_07: [RGB8; 16] = colors_linear![ #E8729B,
+               #ED7472, #E97C48, #DB8912, #C19905, #A1A717,
+               #74B34C, #30BA79, #00B8A1, #01B4BF, #05AFDC,
+               #43A5F6, #7A98FC, #A28BF3, #C17FDE, #D977C0];
 }
 
+// Default brightness at half what we could do,
+// still plenty bright for most situations,
+// but slightly less ridiculous (though still excessive) at night.
 static FADE_LEVEL: AtomicU8F8 = AtomicU8F8::new(U8F8::lit("0.5"));
+// Default animation timing is 10s per cycle.
 static TIME_MULT: AtomicI8F24 = AtomicI8F24::new(I8F24::lit("0.1"));
+// Pausing stops progressing animation time (behaving as if TIME_MULT=0),
+// but does not halt redraws altogether.
+// This ensures that brightness changes, which kick in on the next redraw,
+// still take effect promptly.
 static PAUSED: AtomicBool = AtomicBool::new(false);
 fn is_paused() -> bool {
     PAUSED.load(Relaxed)
