@@ -316,7 +316,7 @@ fn duration_to_secs(d: Duration) -> I8F24 {
     // While I64F0::wide_div would work, that calls for a 128-bit division,
     // which sounds rather slow on a 32-bit CPU, so let's stick to 32->64 bits.
     let wide_result: U32F32 = ticks.wide_div(ticks_per_s);
-    return wide_result.saturating_to_num();
+    wide_result.saturating_to_num()
 }
 
 async fn push<A: animations::Animation>(
@@ -418,7 +418,7 @@ where
     let mut slot = s.send().await;
     let result = f(&mut *slot); // Explicitly unwrap the smart pointer
     slot.send_done();
-    return result;
+    result
 }
 
 // As above, but for receiving, and takes an async closure.
@@ -432,7 +432,7 @@ where
     let mut slot = r.receive().await;
     let result = f(&mut *slot).await;
     slot.receive_done();
-    return result;
+    result
 }
 
 // Program metadata for `picotool info`.

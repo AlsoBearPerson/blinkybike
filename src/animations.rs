@@ -78,10 +78,10 @@ where
     fn get(&self, time: I8F24, led: usize) -> RGB8 {
         let led = self.lm.remap(led);
         let offset = self.pm.remap(time, led);
-        if offset < 0 || offset > 1 {
+        if !(0..=1).contains(&offset) {
             return RGB8::default();
         }
-        return self.cl.to_color(offset);
+        self.cl.to_color(offset)
     }
 }
 
@@ -119,7 +119,7 @@ pub struct Linear<const NUM_LEDS: usize>;
 impl<const NUM_LEDS: usize> LedMapper for Linear<NUM_LEDS> {
     fn remap(&self, led: usize) -> I8F24 {
         let frac: I8F24 = I8F24::ONE / (NUM_LEDS as i32);
-        return frac * (led as i32);
+        frac * (led as i32)
     }
 }
 
@@ -139,7 +139,7 @@ impl<const N1_LEDS: usize, const N2_LEDS: usize> LedMapper for LinRev<N1_LEDS, N
             let rev_index = N1_LEDS + N2_LEDS - 1 - led;
             N1_LEDS + rev_index
         };
-        return frac * (led as i32);
+        frac * (led as i32)
     }
 }
 
@@ -151,9 +151,9 @@ impl PixelMapper for Slide {
     fn remap(&self, time: I8F24, led: I8F24) -> I8F24 {
         let result: I8F24 = time - led;
         if result < 0 {
-            return result + I8F24::ONE;
+            result + I8F24::ONE
         } else {
-            return result;
+            result
         }
     }
 }
@@ -166,7 +166,7 @@ struct SlideGap;
 impl PixelMapper for SlideGap {
     fn remap(&self, time: I8F24, led: I8F24) -> I8F24 {
         const GAP_WIDTH: I8F24 = I8F24::lit("0.25");
-        return Slide.remap(time, led) * (I8F24::ONE + GAP_WIDTH) - GAP_WIDTH;
+        Slide.remap(time, led) * (I8F24::ONE + GAP_WIDTH) - GAP_WIDTH
     }
 }
 
@@ -200,11 +200,11 @@ impl ColorLookup for RampWheel {
         }
         let offset = offset - C256;
         let trunc: u8 = offset.to_num();
-        return RGB8 {
+        RGB8 {
             r: trunc,
             g: 0,
             b: 255 - trunc,
-        };
+        }
     }
 }
 
@@ -216,9 +216,9 @@ impl ColorLookup for FlagLookup {
         let offset: I8F24 = offset * (self.0.len() as i32);
         let offset: usize = offset.to_num();
         if offset < self.0.len() {
-            return self.0[offset];
+            self.0[offset]
         } else {
-            return *self.0.last().unwrap();
+            self.0.last().copied().unwrap_or(RGB8::default())
         }
     }
 }
@@ -238,7 +238,7 @@ impl ManyFlags {
 impl ColorLookup for ManyFlags {
     fn to_color(&self, offset: I8F24) -> RGB8 {
         let flag = self.flags[self.cur_index];
-        return FlagLookup(flag).to_color(offset);
+        FlagLookup(flag).to_color(offset)
     }
 }
 impl CanAdvance for ManyFlags {
@@ -257,9 +257,12 @@ impl CanAdvance for ManyFlags {
 struct SmoothStep(&'static [RGB8]);
 impl ColorLookup for SmoothStep {
     fn to_color(&self, offset: I8F24) -> RGB8 {
+        if self.0.is_empty() {
+            return RGB8::default();
+        }
         let offset: I8F24 = offset * (self.0.len() as i32);
         let index: usize = offset.to_num();
-        let (prev, next) = if index < self.0.len() - 1 {
+        let (prev, next) = if index + 1 < self.0.len() {
             (self.0[index], self.0[index + 1])
         } else {
             (*self.0.last().unwrap(), self.0[0])

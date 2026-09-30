@@ -68,7 +68,7 @@ pub fn try_send(v: UartMessage) {
 
 pub fn get_receiver()
 -> embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, UartMessage, 10> {
-    return RX_CHAN.receiver();
+    RX_CHAN.receiver()
 }
 
 // Manually place the large firmware blob into its own link section.
