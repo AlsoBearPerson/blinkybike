@@ -18,7 +18,7 @@ use embassy_rp::{bind_interrupts, dma, peripherals, pio};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::zerocopy_channel;
 use embassy_time::{Duration, Instant, Timer};
-use fixed::{Saturating, traits::Fixed, types::*};
+use fixed::{traits::Fixed, types::*};
 use panic_probe as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
@@ -325,7 +325,7 @@ async fn push<A: animations::Animation>(
     max_iters: usize,
 ) {
     let mut last_time = Instant::now();
-    let mut time_strobe: Saturating<I8F24> = I8F24::ZERO.into();
+    let mut time_strobe: I8F24 = I8F24::ZERO.into();
     let mut state: A::State = Default::default();
     let mut iter_count = 0;
     loop {
@@ -338,18 +338,18 @@ async fn push<A: animations::Animation>(
 
         if !is_paused() {
             let since_last: I8F24 = duration_to_secs(since_last).saturating_mul(TIME_MULT.get());
-            time_strobe += since_last;
-            if time_strobe.0 > 1 {
+            time_strobe = time_strobe.saturating_add(since_last);
+            if time_strobe > 1 {
                 iter_count += 1;
                 if iter_count >= max_iters {
                     return;
                 }
-                time_strobe.0 = I8F24::ZERO;
+                time_strobe = I8F24::ZERO;
             }
         }
 
         run_send(s, |buf| {
-            anim.frame(&mut state, time_strobe.0, buf);
+            anim.frame(&mut state, time_strobe, buf);
             // Fade each LED by multiplying each color channel with the requested fade.
             // For fades greater than 1, this may saturate some channels at 255,
             // which will likely alter the resulting hue.
