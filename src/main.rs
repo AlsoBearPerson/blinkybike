@@ -5,10 +5,11 @@ mod animations;
 mod bleuart;
 mod utils;
 
+use core::fmt::Write;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::Relaxed;
 
-use defmt::*;
+use defmt::{info, unwrap, warn};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_rp::pio::Pio;
@@ -18,7 +19,6 @@ use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::zerocopy_channel;
 use embassy_time::{Duration, Instant, Timer};
 use fixed::{Saturating, traits::Fixed, types::*};
-use heapless::format;
 use panic_probe as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
@@ -82,11 +82,16 @@ async fn process_commands() -> ! {
     loop {
         let v = r.receive().await;
         for cmd in v.split('\n') {
-            match handle_command(cmd).await {
-                Ok(x) if x.is_empty() => (),
-                Ok(reply) => bleuart::try_send(reply),
-                Err(_) => warn!("Reply dropped, too large"),
-            };
+            let mut buf: UartMessage = UartMessage::new();
+            let reply = handle_command(cmd, &mut buf).await;
+            if reply.is_empty() {
+                continue;
+            }
+            if let Ok(reply) = reply.try_into() {
+                bleuart::try_send(reply);
+            } else {
+                warn!("Reply dropped, too large");
+            }
         }
     }
 }
@@ -94,29 +99,26 @@ async fn process_commands() -> ! {
 const FADE_FACTOR: U8F8 = U8F8::lit("1.5");
 const SPEED_FACTOR: I8F24 = I8F24::lit("1.5");
 
-// Handling heapless::String is a tad inconvenient,
-// as there's no infallible way to convert string literals to heapless strings.
-// So for implementation convenience, we drag the Result type around,
-// expecting no error unless something went very wrong.
-async fn handle_command(cmd: &str) -> Result<UartMessage, heapless::CapacityError> {
+async fn handle_command<'a>(cmd: &str, buf: &'a mut UartMessage) -> &'a str {
     match cmd {
-        "B--" => shrink_cmd(&FADE_LEVEL, FADE_FACTOR, "Darker", "Too dark!"),
+        "B--" => shrink_cmd(&FADE_LEVEL, FADE_FACTOR, "Darker", "Too dark!", buf),
         "B++" => grow_cmd(
             &FADE_LEVEL,
             FADE_FACTOR,
             U8F8::ONE,
             "Brighter",
             "Max bright!",
+            buf,
         ),
         "S--" => {
             if clear_paused() {
-                return "Unpaused.".try_into();
+                return "Unpaused.";
             }
-            shrink_cmd(&TIME_MULT, SPEED_FACTOR, "Slower", "Too slow!")
+            shrink_cmd(&TIME_MULT, SPEED_FACTOR, "Slower", "Too slow!", buf)
         }
         "S++" => {
             if clear_paused() {
-                return "Unpaused.".try_into();
+                return "Unpaused.";
             }
             grow_cmd(
                 &TIME_MULT,
@@ -124,52 +126,47 @@ async fn handle_command(cmd: &str) -> Result<UartMessage, heapless::CapacityErro
                 10.into(),
                 "Faster",
                 "Ludicrous speed!",
+                buf,
             )
         }
         "PAUSE" => {
             let val = flip_paused();
-            if val {
-                "Unpaused.".try_into()
-            } else {
-                "Paused.".try_into()
-            }
+            if val { "Unpaused." } else { "Paused." }
         }
         "NEXT" => {
             let val = set_fastforward();
-            if val {
-                // Fastforward should clear itself promptly on the next animation frame.
-                // If we ever find it already set, something strange might be afoot.
-                "Stuck?".try_into()
-            } else {
-                "Go next.".try_into()
-            }
+            // Fastforward should clear itself promptly on the next animation frame.
+            // If we ever find it already set, something strange might be afoot.
+            if val { "Stuck?" } else { "Go next." }
         }
-        _ => "???".try_into(),
+        _ => "???",
     }
 }
 
-fn shrink_cmd<F: AtomicFixed>(
+fn shrink_cmd<'a, F: AtomicFixed>(
     holder: &F,
     factor: F::Value,
-    msg: &str,
-    underflow_msg: &str,
-) -> Result<UartMessage, heapless::CapacityError> {
+    msg: &'a str,
+    underflow_msg: &'a str,
+    buf: &'a mut UartMessage,
+) -> &'a str {
     let cur = holder.get() / factor;
     if cur > 0 {
         holder.set(cur);
-        changemsg(msg, cur)
+        changemsg(msg, cur, buf)
     } else {
-        underflow_msg.try_into()
+        underflow_msg
     }
 }
 
-fn grow_cmd<F: AtomicFixed>(
+fn grow_cmd<'a, F: AtomicFixed>(
     holder: &F,
     factor: F::Value,
     max: F::Value,
-    msg: &str,
-    overflow_msg: &str,
-) -> Result<UartMessage, heapless::CapacityError> {
+    msg: &'a str,
+    overflow_msg: &'a str,
+    buf: &'a mut UartMessage,
+) -> &'a str {
     let cur = holder.get();
     let mut val = cur.saturating_mul(factor);
     if val == cur && val < F::Value::MAX {
@@ -177,23 +174,26 @@ fn grow_cmd<F: AtomicFixed>(
         val += F::Value::DELTA;
     }
     let result = if val < max {
-        changemsg(msg, val)
+        changemsg(msg, val, buf)
     } else {
         val = max;
-        overflow_msg.try_into()
+        overflow_msg
     };
     holder.set(val);
     result
 }
 
-fn changemsg(
-    msg: &str,
+fn changemsg<'a>(
+    msg: &'a str,
     val: impl Fixed + defmt::Format,
-) -> Result<UartMessage, heapless::CapacityError> {
-    format!("{}->{:X}", msg, val).or_else(|_| {
+    buf: &'a mut UartMessage,
+) -> &'a str {
+    if core::write!(buf, "{}->{:X}", msg, val).is_ok() {
+        buf
+    } else {
         warn!("Fmt fail/overflow: {:?} / {:?}", msg, val);
-        msg.try_into()
-    })
+        msg
+    }
 }
 
 #[allow(unused)]
